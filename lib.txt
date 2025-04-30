@@ -1,0 +1,1 @@
+pip install cloudscraper certifi python-telegram-bot python-dotenv
